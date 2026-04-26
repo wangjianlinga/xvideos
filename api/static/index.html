@@ -99,6 +99,39 @@
     }
     .btn-secondary:hover { background: #2e2e36; }
 
+    .tabs {
+      display: flex;
+      gap: 0.25rem;
+      background: var(--bg);
+      padding: 0.25rem;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+    }
+
+    .tab {
+      background: transparent;
+      color: var(--text-secondary);
+      border: none;
+      padding: 0.4rem 1rem;
+      border-radius: 8px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .tab.active {
+      background: var(--surface-hover);
+      color: var(--text);
+    }
+
+    .tab:hover:not(.active) {
+      color: var(--text);
+    }
+
+    .tab-panel { display: none; }
+    .tab-panel.active { display: flex; }
+
     main {
       max-width: 1400px;
       margin: 0 auto;
@@ -292,8 +325,20 @@
     <div class="header-content">
       <div class="logo">XVideos Crawler</div>
       <div class="controls">
-        <input type="number" id="crawlPages" min="1" max="10" value="1" title="Pages to crawl">
-        <button id="btnCrawl" onclick="triggerCrawl()">Crawl</button>
+        <div class="tabs">
+          <button class="tab active" onclick="switchTab('fresh')" id="tab-fresh">Fresh</button>
+          <button class="tab" onclick="switchTab('best')" id="tab-best">Best</button>
+        </div>
+        <div class="tab-panel active" id="panel-fresh">
+          <input type="number" id="crawlPages" min="1" max="10" value="1" title="Pages to crawl">
+          <button id="btnCrawl" onclick="triggerCrawl()">Crawl</button>
+        </div>
+        <div class="tab-panel" id="panel-best">
+          <input type="text" id="bestYear" value="2018" placeholder="Year" title="Year" style="width:70px;text-align:center;">
+          <input type="text" id="bestMonth" value="02" placeholder="Month" title="Month" style="width:60px;text-align:center;">
+          <input type="number" id="bestPages" min="1" max="10" value="1" title="Pages to crawl">
+          <button id="btnCrawlBest" onclick="triggerCrawlBest()">Crawl Best</button>
+        </div>
         <input type="text" id="searchInput" placeholder="Search videos..." onkeydown="if(event.key==='Enter')doSearch()">
         <button class="btn-secondary" onclick="doSearch()">Search</button>
       </div>
@@ -441,6 +486,13 @@
       el.innerHTML = html;
     }
 
+    function switchTab(name) {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+      document.getElementById('tab-' + name).classList.add('active');
+      document.getElementById('panel-' + name).classList.add('active');
+    }
+
     async function triggerCrawl() {
       const btn = document.getElementById('btnCrawl');
       const pages = parseInt(document.getElementById('crawlPages').value, 10) || 1;
@@ -463,6 +515,38 @@
       } finally {
         btn.disabled = false;
         btn.textContent = 'Crawl';
+      }
+    }
+
+    async function triggerCrawlBest() {
+      const btn = document.getElementById('btnCrawlBest');
+      const year = document.getElementById('bestYear').value.trim() || '2018';
+      const month = document.getElementById('bestMonth').value.trim() || '02';
+      const pages = parseInt(document.getElementById('bestPages').value, 10) || 1;
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span>Crawling...';
+
+      try {
+        const url = new URL(`${API_BASE}/api/crawl/best`);
+        url.searchParams.set('year', year);
+        url.searchParams.set('month', month);
+        url.searchParams.set('pages', pages);
+
+        const res = await fetch(url, { method: 'POST' });
+        const data = await res.json();
+
+        if (data.success) {
+          showToast(`Best crawl complete! Checked ${pages} page(s) for ${year}-${month}.`, 'success');
+          await fetchStats();
+          await fetchVideos(1, currentSearch);
+        } else {
+          showToast(`Crawl failed: ${data.stderr || data.stdout || 'Unknown error'}`, 'error');
+        }
+      } catch (e) {
+        showToast(`Crawl error: ${e.message}`, 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Crawl Best';
       }
     }
 

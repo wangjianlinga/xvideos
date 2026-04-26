@@ -23,6 +23,7 @@ app.add_middleware(
 DB_PATH = Path(__file__).parent.parent / "data" / "videos.db"
 STATIC_DIR = Path(__file__).parent / "static"
 CRAWLER_JS = Path(__file__).parent.parent / "index-fresh.js"
+CRAWLER_BEST_JS = Path(__file__).parent.parent / "crawler-best.js"
 
 def init_db():
     """Ensure the SQLite database and schema exist."""
@@ -129,6 +130,35 @@ def trigger_crawl(pages: int = Query(1, ge=1, le=10)):
             "stdout": result.stdout,
             "stderr": result.stderr,
             "returncode": result.returncode
+        }
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/crawl/best")
+def trigger_crawl_best(
+    year: str = Query("2018"),
+    month: str = Query("02"),
+    pages: int = Query(1, ge=1, le=10)
+):
+    if not CRAWLER_BEST_JS.exists():
+        return JSONResponse({"error": "Best crawler not found"}, status_code=500)
+
+    try:
+        cmd = ["node", str(CRAWLER_BEST_JS), year, month, str(pages)]
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            cwd=str(CRAWLER_BEST_JS.parent)
+        )
+        return {
+            "success": result.returncode == 0,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "returncode": result.returncode,
+            "command": " ".join(cmd)
         }
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
