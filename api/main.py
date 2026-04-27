@@ -46,6 +46,15 @@ def init_db():
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_videos_page ON videos(page_number)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_videos_created ON videos(created_at)")
+
+    # Add file columns (idempotent — ignore if already exist)
+    file_columns = ['file_high', 'file_thumb', 'file_thumb69', 'file_thumb_slide', 'file_thumb_slide_big']
+    for col in file_columns:
+        try:
+            cursor.execute(f"ALTER TABLE videos ADD COLUMN {col} TEXT")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+
     conn.commit()
     conn.close()
 
@@ -122,7 +131,7 @@ def trigger_crawl(pages: int = Query(1, ge=1, le=10)):
             ["node", str(CRAWLER_JS), str(pages)],
             capture_output=True,
             text=True,
-            timeout=180,
+            timeout=1800,
             cwd=str(CRAWLER_JS.parent)
         )
         return {
@@ -150,7 +159,7 @@ def trigger_crawl_best(
             cmd,
             capture_output=True,
             text=True,
-            timeout=180,
+            timeout=1800,
             cwd=str(CRAWLER_BEST_JS.parent)
         )
         return {

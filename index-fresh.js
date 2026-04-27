@@ -15,6 +15,18 @@ const { saveVideos } = require('./lib/db');
       const fresh = await xvideos.videos.fresh({ page: currentPage });
 
       if (fresh.videos && fresh.videos.length > 0) {
+        // Fetch detail files for each video
+        for (let i = 0; i < fresh.videos.length; i++) {
+          const video = fresh.videos[i];
+          try {
+            console.log(`  Fetching details for video ${i + 1}/${fresh.videos.length}: ${video.title}`);
+            const details = await xvideos.videos.details({ url: video.url });
+            video.files = details.files;
+          } catch (err) {
+            console.warn(`  Warning: Failed to fetch details for ${video.url}: ${err.message}`);
+          }
+        }
+
         const saved = saveVideos(fresh.videos, currentPage);
         totalSaved += saved;
         console.log(`  Saved ${saved} videos from page ${currentPage}`);
