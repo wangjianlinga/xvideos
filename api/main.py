@@ -1,12 +1,13 @@
 import sqlite3
 import subprocess
 import os
+import re
 import urllib.parse
 from pathlib import Path
 from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional
+from typing import Optional, List
 
 app = FastAPI(title="XVideos Crawler API")
 
@@ -31,6 +32,26 @@ def get_conn(db_path: Path):
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def parse_views_to_number(views_str: Optional[str]) -> float:
+    """Parse views text like 'Author - 428.8k Views -' or '9.5M' into a float number."""
+    if not views_str:
+        return 0.0
+    # Try 'X Views' format first
+    match = re.search(r'([\d.]+)\s*([kKMm]?)\s*Views', views_str)
+    if not match:
+        # Fallback: any number with optional k/M suffix
+        match = re.search(r'([\d.]+)\s*([kKMm]?)', views_str)
+    if not match:
+        return 0.0
+    num = float(match.group(1))
+    suffix = match.group(2).lower()
+    if suffix == 'k':
+        num *= 1_000
+    elif suffix == 'm':
+        num *= 1_000_000
+    return num
 
 
 def init_db():
@@ -66,11 +87,11 @@ def init_db():
 def list_videos(
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
-    search: Optional[str] = Query(None)
+    search: Optional[str] = Query(None),
+    sort: Optional[str] = Query("views_desc")
 ):
     conn = get_conn(VIDEOS_DB)
     cursor = conn.cursor()
-    offset = (page - 1) * limit
 
     if search:
         search_term = f"%{search}%"
@@ -80,23 +101,36 @@ def list_videos(
         )
         total = cursor.fetchone()["total"]
         cursor.execute(
-            "SELECT * FROM videos WHERE title LIKE ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
-            (search_term, limit, offset)
+            "SELECT * FROM videos WHERE title LIKE ?",
+            (search_term,)
         )
     else:
         cursor.execute("SELECT COUNT(*) as total FROM videos")
         total = cursor.fetchone()["total"]
-        cursor.execute(
-            "SELECT * FROM videos ORDER BY created_at DESC LIMIT ? OFFSET ?",
-            (limit, offset)
-        )
+        cursor.execute("SELECT * FROM videos")
 
     rows = cursor.fetchall()
     conn.close()
 
-    videos = [dict(row) for row in rows]
+    videos: List[dict] = [dict(row) for row in rows]
+
+    # Sorting
+    if sort == "views_desc":
+        videos.sort(key=lambda v: parse_views_to_number(v.get("views")), reverse=True)
+    elif sort == "views_asc":
+        videos.sort(key=lambda v: parse_views_to_number(v.get("views")))
+    elif sort == "title_asc":
+        videos.sort(key=lambda v: (v.get("title") or "").lower())
+    else:
+        # default created_at_desc
+        videos.sort(key=lambda v: v.get("created_at") or "", reverse=True)
+
+    # Pagination after sorting
+    offset = (page - 1) * limit
+    paginated = videos[offset:offset + limit]
+
     return {
-        "videos": videos,
+        "videos": paginated,
         "pagination": {
             "page": page,
             "limit": limit,
@@ -366,9 +400,13 @@ DASHBOARD_HTML = """
   </div>
 
   <!-- Toolbar -->
-  <div class="flex items-center gap-3 mb-4">
+  <div class="flex items-center gap-3 mb-4 flex-wrap">
     <input type="text" id="search" placeholder="Search title..." onkeydown="if(event.key==='Enter') doSearch()" style="min-width:240px;">
     <button class="btn btn-ghost" onclick="doSearch()">Search</button>
+    <select id="sort" onchange="doSearch()" class="btn btn-ghost" style="background:#0f172a; border:1px solid #334155; color:#e2e8f0; padding:0.45rem 0.7rem; border-radius:0.45rem; outline:none; cursor:pointer;">
+      <option value="views_desc" selected>Sort: Views High &rarr; Low</option>
+      <option value="views_asc">Sort: Views Low &rarr; High</option>
+    </select>
     <div class="ml-auto text-xs text-slate-400" id="pageInfo"></div>
   </div>
 
@@ -442,17 +480,22 @@ async function render(){
 }
 
 async function renderVideos(search){
+  const sort = document.getElementById('sort').value;
   const q = search ? `&search=${encodeURIComponent(search)}` : '';
-  const data = await api(`/api/videos?page=${currentPage}&limit=${currentLimit}${q}`);
+  const data = await api(`/api/videos?page=${currentPage}&limit=${currentLimit}&sort=${encodeURIComponent(sort)}${q}`);
   const v = data.videos, p = data.pagination;
-  let html = '<div class="table-wrap"><table><thead><tr><th>ID</th><th>Thumb</th><th>Title</th><th>Duration</th><th>Views</th><th>Page</th><th>Crawled</th><th>Action</th></tr></thead><tbody>';
-  if(!v.length){ html += '<tr><td colspan="8" class="empty">No videos found</td></tr>'; }
+  let html = '<div class="table-wrap"><table><thead><tr><th>ID</th><th>Thumb</th><th>Title</th><th>Duration</th><th>Profile</th><th>Views</th><th>Page</th><th>Crawled</th><th>Action</th></tr></thead><tbody>';
+  if(!v.length){ html += '<tr><td colspan="9" class="empty">No videos found</td></tr>'; }
   else for(const row of v){
+    const profileLink = row.profile_url && row.profile_url.startsWith('http')
+      ? `<a class="link" href="${row.profile_url}" target="_blank">${row.profile_url.substring(0,50)}${row.profile_url.length>50?'...':''}</a>`
+      : '<span class="text-xs text-slate-500">-</span>';
     html += `<tr>
       <td>${row.id}</td>
       <td><img class="thumb" src="https://img-l3.xvideos-cdn.com/videos/thumbs169ll/default.jpg" onerror="this.style.display='none'" alt=""></td>
       <td><div class="font-semibold">${fmt(row.title)}</div><a class="link" href="${row.url}" target="_blank">${row.url.substring(0,60)}${row.url.length>60?'...':''}</a></td>
       <td>${fmt(row.duration)}</td>
+      <td>${profileLink}</td>
       <td>${fmt(row.views)}</td>
       <td>${fmt(row.page_number)}</td>
       <td class="text-xs text-slate-400">${timeAgo(row.created_at)}</td>
