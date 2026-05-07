@@ -42,10 +42,6 @@ console.log(previousPage.pagination.current); // Updated current page number
 console.log(previousPage.hasNext()); // Check if the next page exists
 console.log(previousPage.hasPrevious()); // Check if the previous page exists
 
-// Retrieve detailed information about a specific video
-const detail = await xvideos.videos.details(fresh.videos[0]);
-// Log details of the specific video
-console.log(detail); // Detailed video object with properties like title, duration, image, videoType, views, files
 ```
 
 ## API
@@ -136,16 +132,6 @@ const nextVideos = await verifiedList.next();
 
 // Retrieve the previous page of verified videos if available
 const previousVideos = await verifiedList.previous();
-```
-
-### Retrieve [Video Details](https://www.xvideos.com/video36638661/chaturbate_lulacum69_30-05-2018)
-
-```javascript
-// Retrieve detailed information about a specific video using its URL
-const details = await xvideos.videos.details({ url: 'https://www.xvideos.com/video36638661/chaturbate_lulacum69_30-05-2018' });
-
-// Log detailed information about the video
-console.log(details); // Detailed video object with properties like title, duration, image, videoType, views, files
 ```
 
 ### Filter [Videos](https://www.xvideos.com/?k=threesome)
