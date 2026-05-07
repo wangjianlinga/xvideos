@@ -2,7 +2,7 @@ const xvideos = require('./lib');
 const { saveVideos } = require('./lib/db');
 
 const TARGET_PAGES = process.argv[2] ? parseInt(process.argv[2], 10) : 1;
-const KEYWORD = process.argv[3] || 'threesome';
+const KEYWORD = process.env.CRAWL_KEYWORD || process.argv[3] || 'threesome';
 
 (async () => {
   try {

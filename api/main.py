@@ -2,6 +2,7 @@ import sqlite3
 import subprocess
 import os
 import re
+import json
 import urllib.parse
 from pathlib import Path
 from fastapi import FastAPI, Query
@@ -23,9 +24,13 @@ app.add_middleware(
 
 # Paths
 BASE_DIR = Path(__file__).parent.parent
-VIDEOS_DB = BASE_DIR / "data" / "videos.db"
-CRAWLER_JS = BASE_DIR / "index-fresh.js"
+CONFIG_PATH = BASE_DIR / "config.json"
+config = json.loads(CONFIG_PATH.read_text(encoding="utf-8")) if CONFIG_PATH.exists() else {}
+DB_NAME = config.get("db_name", "videos.db")
+VIDEOS_DB = BASE_DIR / "data" / DB_NAME
+CRAWLER_JS = BASE_DIR / "crawler-fresh.js"
 CRAWLER_BEST_JS = BASE_DIR / "crawler-best.js"
+CRAWLER_SEARCH_JS = BASE_DIR / "scraler-search.js"
 
 
 class BatchDeleteRequest(BaseModel):
@@ -451,6 +456,8 @@ def trigger_crawl(pages: int = Query(1, ge=1, le=10)):
             ["node", str(CRAWLER_JS), str(pages)],
             capture_output=True,
             text=True,
+            encoding='utf-8',
+            errors='replace',
             timeout=180,
             cwd=str(CRAWLER_JS.parent)
         )
@@ -479,8 +486,43 @@ def trigger_crawl_best(
             cmd,
             capture_output=True,
             text=True,
+            encoding='utf-8',
+            errors='replace',
             timeout=180,
             cwd=str(CRAWLER_BEST_JS.parent)
+        )
+        return {
+            "success": result.returncode == 0,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "returncode": result.returncode,
+            "command": " ".join(cmd)
+        }
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/crawl/search")
+def trigger_crawl_search(
+    keyword: str = Query("threesome"),
+    pages: int = Query(1, ge=1, le=10)
+):
+    if not CRAWLER_SEARCH_JS.exists():
+        return JSONResponse({"error": "Search crawler not found"}, status_code=500)
+
+    try:
+        cmd = ["node", str(CRAWLER_SEARCH_JS), str(pages)]
+        env = os.environ.copy()
+        env["CRAWL_KEYWORD"] = keyword
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            timeout=180,
+            cwd=str(CRAWLER_SEARCH_JS.parent),
+            env=env
         )
         return {
             "success": result.returncode == 0,
@@ -564,7 +606,7 @@ DASHBOARD_HTML = """
       <p class="text-sm text-slate-400 mt-1">Videos DB explorer</p>
     </div>
     <div class="flex items-center gap-2">
-      <button class="btn btn-primary" onclick="triggerCrawl()">Crawl Fresh</button>
+      <button class="btn btn-primary" onclick="switchTab('crawler')">Go to Scrawler</button>
     </div>
   </header>
 
@@ -575,6 +617,7 @@ DASHBOARD_HTML = """
   <div class="flex border-b border-slate-700 mb-4">
     <div class="tab-btn active" onclick="switchTab('videos')" id="tab-videos">Videos</div>
     <div class="tab-btn" onclick="switchTab('deleted')" id="tab-deleted">Trash</div>
+    <div class="tab-btn" onclick="switchTab('crawler')" id="tab-crawler">Scrawler</div>
   </div>
 
   <!-- Toolbar -->
@@ -664,12 +707,13 @@ function switchTab(tab){
   document.getElementById('tab-'+tab).classList.add('active');
   const btn = document.getElementById('batchBtn');
   const restoreBtn = document.getElementById('restoreBtn');
-  if(btn) btn.style.display = tab==='deleted' ? 'none' : 'inline-flex';
+  if(btn) btn.style.display = (tab==='deleted' || tab==='crawler') ? 'none' : 'inline-flex';
   if(restoreBtn) restoreBtn.style.display = tab==='deleted' ? 'inline-flex' : 'none';
   render();
 }
 
 async function render(){
+  if(currentTab==='crawler'){ renderCrawler(); return; }
   const search = document.getElementById('search').value.trim();
   const source = document.getElementById('searchSource').value.trim();
   if(currentTab==='deleted') await renderDeleted(search, favFilter, source);
@@ -900,20 +944,94 @@ function renderPagination(page, pages){
 function goPage(n){ currentPage=n; render(); }
 function doSearch(){ currentPage=1; render(); }
 
-async function triggerCrawl(){
-  const pages = prompt('Pages to crawl?', '1');
-  if(!pages) return;
-  const btn = document.querySelector('header button:last-child');
-  const orig = btn.textContent;
+function renderCrawler(){
+  document.getElementById('content').innerHTML = `
+    <div class="grid-2">
+      <div class="card">
+        <div class="text-sm font-semibold mb-3">Fresh Crawler</div>
+        <div class="flex items-center gap-2 mb-3">
+          <label class="text-xs text-slate-400">Pages</label>
+          <input type="number" id="crawlFreshPages" value="1" min="1" max="10" style="width:80px;">
+        </div>
+        <button class="btn btn-primary" onclick="triggerCrawlFresh()">Run Fresh Crawl</button>
+        <pre id="logFresh" class="mt-3 text-xs text-slate-400" style="white-space:pre-wrap;word-break:break-word;max-height:200px;overflow-y:auto;"></pre>
+      </div>
+      <div class="card">
+        <div class="text-sm font-semibold mb-3">Best Crawler</div>
+        <div class="flex items-center gap-2 mb-2">
+          <label class="text-xs text-slate-400">Year</label>
+          <input type="text" id="crawlBestYear" value="2018" style="width:80px;">
+          <label class="text-xs text-slate-400">Month</label>
+          <input type="text" id="crawlBestMonth" value="02" style="width:60px;">
+          <label class="text-xs text-slate-400">Pages</label>
+          <input type="number" id="crawlBestPages" value="1" min="1" max="10" style="width:80px;">
+        </div>
+        <button class="btn btn-primary" onclick="triggerCrawlBest()">Run Best Crawl</button>
+        <pre id="logBest" class="mt-3 text-xs text-slate-400" style="white-space:pre-wrap;word-break:break-word;max-height:200px;overflow-y:auto;"></pre>
+      </div>
+      <div class="card">
+        <div class="text-sm font-semibold mb-3">Search Crawler</div>
+        <div class="flex items-center gap-2 mb-2">
+          <label class="text-xs text-slate-400">Keyword</label>
+          <input type="text" id="crawlSearchKeyword" value="threesome" style="width:160px;">
+          <label class="text-xs text-slate-400">Pages</label>
+          <input type="number" id="crawlSearchPages" value="1" min="1" max="10" style="width:80px;">
+        </div>
+        <button class="btn btn-primary" onclick="triggerCrawlSearch()">Run Search Crawl</button>
+        <pre id="logSearch" class="mt-3 text-xs text-slate-400" style="white-space:pre-wrap;word-break:break-word;max-height:200px;overflow-y:auto;"></pre>
+      </div>
+    </div>
+  `;
+  document.getElementById('pageInfo').textContent = '';
+  document.getElementById('pagination').innerHTML = '';
+}
+
+async function triggerCrawlFresh(){
+  const pages = document.getElementById('crawlFreshPages').value;
+  const log = document.getElementById('logFresh');
+  const btn = event.target;
   btn.textContent = 'Crawling...';
   btn.disabled = true;
+  log.textContent = 'Running...';
   const res = await fetch('/api/crawl?pages='+encodeURIComponent(pages), {method:'POST'});
   const data = await res.json();
-  btn.textContent = orig;
+  btn.textContent = 'Run Fresh Crawl';
   btn.disabled = false;
-  alert(data.success ? 'Crawl finished. Check console.' : 'Crawl failed: '+(data.error||data.stderr||'Unknown'));
+  log.textContent = data.success ? data.stdout || 'Done' : (data.error || data.stderr || 'Failed');
   loadDashboard();
-  render();
+}
+
+async function triggerCrawlBest(){
+  const year = document.getElementById('crawlBestYear').value;
+  const month = document.getElementById('crawlBestMonth').value;
+  const pages = document.getElementById('crawlBestPages').value;
+  const log = document.getElementById('logBest');
+  const btn = event.target;
+  btn.textContent = 'Crawling...';
+  btn.disabled = true;
+  log.textContent = 'Running...';
+  const res = await fetch('/api/crawl/best?year='+encodeURIComponent(year)+'&month='+encodeURIComponent(month)+'&pages='+encodeURIComponent(pages), {method:'POST'});
+  const data = await res.json();
+  btn.textContent = 'Run Best Crawl';
+  btn.disabled = false;
+  log.textContent = data.success ? data.stdout || 'Done' : (data.error || data.stderr || 'Failed');
+  loadDashboard();
+}
+
+async function triggerCrawlSearch(){
+  const keyword = document.getElementById('crawlSearchKeyword').value;
+  const pages = document.getElementById('crawlSearchPages').value;
+  const log = document.getElementById('logSearch');
+  const btn = event.target;
+  btn.textContent = 'Crawling...';
+  btn.disabled = true;
+  log.textContent = 'Running...';
+  const res = await fetch('/api/crawl/search?keyword='+encodeURIComponent(keyword)+'&pages='+encodeURIComponent(pages), {method:'POST'});
+  const data = await res.json();
+  btn.textContent = 'Run Search Crawl';
+  btn.disabled = false;
+  log.textContent = data.success ? data.stdout || 'Done' : (data.error || data.stderr || 'Failed');
+  loadDashboard();
 }
 
 loadDashboard();
