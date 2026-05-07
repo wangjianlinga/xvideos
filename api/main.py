@@ -76,6 +76,7 @@ def init_db():
             page_number INTEGER,
             favorite INTEGER DEFAULT 0,
             is_deleted INTEGER DEFAULT 0,
+            source TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -88,6 +89,8 @@ def init_db():
         cursor.execute("ALTER TABLE videos ADD COLUMN favorite INTEGER DEFAULT 0")
     if "is_deleted" not in columns:
         cursor.execute("ALTER TABLE videos ADD COLUMN is_deleted INTEGER DEFAULT 0")
+    if "source" not in columns:
+        cursor.execute("ALTER TABLE videos ADD COLUMN source TEXT")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_videos_favorite ON videos(favorite)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_videos_deleted ON videos(is_deleted)")
     conn.commit()
@@ -107,7 +110,9 @@ def list_videos(
     limit: int = Query(20, ge=1, le=100),
     search: Optional[str] = Query(None),
     profile: Optional[str] = Query(None),
-    sort: Optional[str] = Query("views_desc")
+    sort: Optional[str] = Query("views_desc"),
+    favorite: Optional[int] = Query(None),
+    source: Optional[str] = Query(None)
 ):
     conn = get_conn(VIDEOS_DB)
     cursor = conn.cursor()
@@ -115,6 +120,12 @@ def list_videos(
     base_where = "is_deleted = 0"
     conditions = []
     params = []
+    if favorite is not None:
+        conditions.append("favorite = ?")
+        params.append(favorite)
+    if source:
+        conditions.append("source LIKE ?")
+        params.append(f"%{source}%")
     if search:
         search_term = f"%{search}%"
         conditions.append("(title LIKE ? OR profile_name LIKE ?)")
@@ -295,7 +306,9 @@ def list_deleted(
     limit: int = Query(20, ge=1, le=100),
     search: Optional[str] = Query(None),
     profile: Optional[str] = Query(None),
-    sort: Optional[str] = Query("created_at_desc")
+    sort: Optional[str] = Query("created_at_desc"),
+    favorite: Optional[int] = Query(None),
+    source: Optional[str] = Query(None)
 ):
     conn = get_conn(VIDEOS_DB)
     cursor = conn.cursor()
@@ -303,6 +316,12 @@ def list_deleted(
     base_where = "is_deleted = 1"
     conditions = []
     params = []
+    if favorite is not None:
+        conditions.append("favorite = ?")
+        params.append(favorite)
+    if source:
+        conditions.append("source LIKE ?")
+        params.append(f"%{source}%")
     if search:
         search_term = f"%{search}%"
         conditions.append("(title LIKE ? OR profile_name LIKE ?)")
@@ -491,10 +510,10 @@ DASHBOARD_HTML = """
   .card { background:#1e293b; border:1px solid #334155; border-radius:0.75rem; padding:1.25rem; }
   .table-wrap { overflow-x:auto; }
   table { width:100%; border-collapse:collapse; font-size:0.875rem; }
-  th, td { padding:0.65rem 0.75rem; border-bottom:1px solid #334155; text-align:left; vertical-align:top; word-break:break-word; overflow-wrap:anywhere; }
+  th, td { padding:0.35rem 0.6rem; border-bottom:1px solid #334155; text-align:left; vertical-align:middle; word-break:break-word; overflow-wrap:anywhere; }
   th { color:#94a3b8; font-weight:600; text-transform:uppercase; font-size:0.7rem; letter-spacing:0.05em; }
-  td:nth-child(2), th:nth-child(2), td:nth-child(3), th:nth-child(3), td:nth-child(5), th:nth-child(5), td:nth-child(8), th:nth-child(8) { white-space: nowrap; }
-  td:nth-child(4), th:nth-child(4) { min-width: 240px; }
+  td:nth-child(2), th:nth-child(2), td:nth-child(3), th:nth-child(3), td:nth-child(4), th:nth-child(4), td:nth-child(6), th:nth-child(6), td:nth-child(9), th:nth-child(9) { white-space: nowrap; }
+  td:nth-child(5), th:nth-child(5) { min-width: 240px; }
   tr:hover td { background:#162032; }
   .btn { display:inline-flex; align-items:center; gap:0.35rem; padding:0.4rem 0.7rem; border-radius:0.45rem; font-size:0.8rem; font-weight:600; cursor:pointer; border:none; }
   .btn-primary { background:#3b82f6; color:#fff; }
@@ -529,6 +548,7 @@ DASHBOARD_HTML = """
   .star { cursor:pointer; font-size:1.1rem; user-select:none; }
   .star.on { color:#fbbf24; }
   .star.off { color:#64748b; }
+  .fav-filter-active { color:#fbbf24 !important; cursor:pointer; }
   .batch-bar { display:none; align-items:center; gap:0.5rem; padding:0.5rem 0.75rem; background:#1e293b; border:1px solid #334155; border-radius:0.45rem; margin-bottom:0.75rem; }
   .batch-bar.active { display:inline-flex; }
   html { scrollbar-width: none; }
@@ -554,14 +574,13 @@ DASHBOARD_HTML = """
   <!-- Tabs -->
   <div class="flex border-b border-slate-700 mb-4">
     <div class="tab-btn active" onclick="switchTab('videos')" id="tab-videos">Videos</div>
-    <div class="tab-btn" onclick="switchTab('favorites')" id="tab-favorites">Favorites</div>
     <div class="tab-btn" onclick="switchTab('deleted')" id="tab-deleted">Trash</div>
   </div>
 
   <!-- Toolbar -->
   <div class="flex items-center gap-3 mb-4 flex-wrap">
     <input type="text" id="search" placeholder="Search title..." onkeydown="if(event.key==='Enter') doSearch()" style="min-width:200px;">
-    <input type="text" id="searchProfile" placeholder="Search profile..." onkeydown="if(event.key==='Enter') doSearch()" style="min-width:160px;">
+    <input type="text" id="searchSource" placeholder="Source..." onkeydown="if(event.key==='Enter') doSearch()" style="min-width:90px;">
     <button class="btn btn-ghost" onclick="doSearch()">Search</button>
     <select id="sort" onchange="doSearch()" class="btn btn-ghost" style="background:#0f172a; border:1px solid #334155; color:#e2e8f0; padding:0.45rem 0.7rem; border-radius:0.45rem; outline:none; cursor:pointer;">
       <option value="views_desc" selected>Sort: Views High &rarr; Low</option>
@@ -602,6 +621,9 @@ let currentTab = 'videos';
 let currentPage = 1;
 let currentLimit = 20;
 let selectedIds = new Set();
+let lastClickedId = null;
+let currentPageIds = [];
+let favFilter = false;
 
 async function api(path, opts){
   const res = await fetch(path, opts);
@@ -625,11 +647,6 @@ async function loadDashboard(){
       <div class="text-xs text-slate-500 mt-1">Last: ${timeAgo(v.last_crawl)}</div>
     </div>
     <div class="card">
-      <div class="text-xs text-slate-400 uppercase tracking-wider">Favorites</div>
-      <div class="text-3xl font-bold mt-1">${fmt(f.total)}</div>
-      <div class="text-xs text-slate-500 mt-1">Saved favorites</div>
-    </div>
-    <div class="card">
       <div class="text-xs text-slate-400 uppercase tracking-wider">Trash</div>
       <div class="text-3xl font-bold mt-1">${fmt(d.total)}</div>
       <div class="text-xs text-slate-500 mt-1">Soft-deleted videos</div>
@@ -641,6 +658,7 @@ function switchTab(tab){
   currentTab = tab;
   currentPage = 1;
   selectedIds.clear();
+  favFilter = false;
   updateBatchBar();
   document.querySelectorAll('.tab-btn').forEach(el=>el.classList.remove('active'));
   document.getElementById('tab-'+tab).classList.add('active');
@@ -653,10 +671,15 @@ function switchTab(tab){
 
 async function render(){
   const search = document.getElementById('search').value.trim();
-  const profile = document.getElementById('searchProfile').value.trim();
-  if(currentTab==='favorites') await renderFavorites(search, profile);
-  else if(currentTab==='deleted') await renderDeleted(search, profile);
-  else await renderVideos(search, profile);
+  const source = document.getElementById('searchSource').value.trim();
+  if(currentTab==='deleted') await renderDeleted(search, favFilter, source);
+  else await renderVideos(search, favFilter, source);
+}
+
+function toggleFavFilter(){
+  favFilter = !favFilter;
+  currentPage = 1;
+  render();
 }
 
 function updateBatchBar(){
@@ -674,12 +697,15 @@ function toggleSelect(id, checked){
   if(checked) selectedIds.add(id);
   else selectedIds.delete(id);
   updateBatchBar();
+  updateSelectAllCheckbox();
 }
 
 function toggleSelectAll(checked, ids){
   if(checked) ids.forEach(id=>selectedIds.add(id));
   else ids.forEach(id=>selectedIds.delete(id));
+  lastClickedId = null;
   updateBatchBar();
+  updateSelectAllCheckbox();
 }
 
 async function toggleFavorite(id, el){
@@ -744,15 +770,51 @@ async function executeBatchRestore(){
   }
 }
 
-async function renderVideos(search, profile){
+function updateSelectAllCheckbox(){
+  const selectAll = document.getElementById('selectAll');
+  if(selectAll && currentPageIds.length > 0){
+    selectAll.checked = currentPageIds.every(id => selectedIds.has(id));
+  }
+}
+
+function handleCheckboxClick(event, id){
+  if(event.shiftKey && lastClickedId !== null && currentPageIds.length > 0){
+    event.preventDefault();
+    const startIdx = currentPageIds.indexOf(lastClickedId);
+    const endIdx = currentPageIds.indexOf(id);
+    if(startIdx !== -1 && endIdx !== -1){
+      const [minIdx, maxIdx] = startIdx < endIdx ? [startIdx, endIdx] : [endIdx, startIdx];
+      const shouldCheck = !selectedIds.has(id);
+      for(let i = minIdx; i <= maxIdx; i++){
+        const rangeId = currentPageIds[i];
+        if(shouldCheck) selectedIds.add(rangeId);
+        else selectedIds.delete(rangeId);
+      }
+      document.querySelectorAll('tbody input[type="checkbox"]').forEach(cb => {
+        const cbId = parseInt(cb.dataset.id);
+        cb.checked = selectedIds.has(cbId);
+      });
+      updateSelectAllCheckbox();
+      updateBatchBar();
+    }
+    lastClickedId = id;
+  } else {
+    lastClickedId = id;
+  }
+}
+
+async function renderVideos(search, favoriteOnly, source){
   const sort = document.getElementById('sort').value;
   const q = search ? `&search=${encodeURIComponent(search)}` : '';
-  const qp = profile ? `&profile=${encodeURIComponent(profile)}` : '';
-  const data = await api(`/api/videos?page=${currentPage}&limit=${currentLimit}&sort=${encodeURIComponent(sort)}${q}${qp}`);
+  const fav = favoriteOnly ? `&favorite=1` : '';
+  const src = source ? `&source=${encodeURIComponent(source)}` : '';
+  const data = await api(`/api/videos?page=${currentPage}&limit=${currentLimit}&sort=${encodeURIComponent(sort)}${q}${fav}${src}`);
   const v = data.videos, p = data.pagination;
   const pageIds = v.map(r=>r.id);
-  let html = '<div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="selectAll" onclick="toggleSelectAll(this.checked, ['+pageIds.join(',')+'])"></th><th>ID</th><th>Fav</th><th>Title</th><th>Duration</th><th>Profile</th><th>Views</th><th>Crawled</th></tr></thead><tbody>';
-  if(!v.length){ html += '<tr><td colspan="8" class="empty">No videos found</td></tr>'; }
+  currentPageIds = pageIds;
+  const favCls = favFilter ? 'fav-filter-active' : '';
+  let html = '<div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="selectAll" onclick="toggleSelectAll(this.checked, ['+pageIds.join(',')+'])"></th><th>ID</th><th onclick="toggleFavFilter()" class="'+favCls+'">Fav</th><th>Source</th><th>Title</th><th>Duration</th><th>Profile</th><th>Views</th><th>Crawled</th></tr></thead><tbody>';
+  if(!v.length){ html += '<tr><td colspan="9" class="empty">No videos found</td></tr>'; }
   else for(const row of v){
     const profileLink = row.profile_url && row.profile_url.startsWith('http')
       ? `<a class="link" href="${row.profile_url}" target="_blank">${row.profile_url.substring(0,50)}${row.profile_url.length>50?'...':''}</a>`
@@ -761,9 +823,10 @@ async function renderVideos(search, profile){
     const star = row.favorite ? '\u2605' : '\u2606';
     const checked = selectedIds.has(row.id) ? 'checked' : '';
     html += `<tr>
-      <td><input type="checkbox" ${checked} onchange="toggleSelect(${row.id}, this.checked)"></td>
+      <td><input type="checkbox" ${checked} data-id="${row.id}" onclick="handleCheckboxClick(event, ${row.id})" onchange="toggleSelect(${row.id}, this.checked)"></td>
       <td>${row.id}</td>
       <td><span class="star ${isFav}" onclick="toggleFavorite(${row.id}, this)">${star}</span></td>
+      <td><span class="tag">${fmt(row.source)}</span></td>
       <td><div class="font-semibold">${fmt(row.title)}</div><a class="link" href="${row.url}" target="_blank">${row.url.substring(0,60)}${row.url.length>60?'...':''}</a></td>
       <td>${fmt(row.duration)}</td>
       <td>${profileLink}</td>
@@ -778,15 +841,18 @@ async function renderVideos(search, profile){
 }
 
 
-async function renderDeleted(search, profile){
+async function renderDeleted(search, favoriteOnly, source){
   const sort = document.getElementById('sort').value;
   const q = search ? `&search=${encodeURIComponent(search)}` : '';
-  const qp = profile ? `&profile=${encodeURIComponent(profile)}` : '';
-  const data = await api(`/api/videos/deleted/list?page=${currentPage}&limit=${currentLimit}&sort=${encodeURIComponent(sort)}${q}${qp}`);
+  const fav = favoriteOnly ? `&favorite=1` : '';
+  const src = source ? `&source=${encodeURIComponent(source)}` : '';
+  const data = await api(`/api/videos/deleted/list?page=${currentPage}&limit=${currentLimit}&sort=${encodeURIComponent(sort)}${q}${fav}${src}`);
   const v = data.videos, p = data.pagination;
   const pageIds = v.map(r=>r.id);
-  let html = '<div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="selectAll" onclick="toggleSelectAll(this.checked, ['+pageIds.join(',')+'])"></th><th>ID</th><th>Fav</th><th>Title</th><th>Duration</th><th>Profile</th><th>Views</th><th>Crawled</th><th>Action</th></tr></thead><tbody>';
-  if(!v.length){ html += '<tr><td colspan="9" class="empty">No deleted videos</td></tr>'; }
+  currentPageIds = pageIds;
+  const favCls = favFilter ? 'fav-filter-active' : '';
+  let html = '<div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="selectAll" onclick="toggleSelectAll(this.checked, ['+pageIds.join(',')+'])"></th><th>ID</th><th onclick="toggleFavFilter()" class="'+favCls+'">Fav</th><th>Source</th><th>Title</th><th>Duration</th><th>Profile</th><th>Views</th><th>Crawled</th><th>Action</th></tr></thead><tbody>';
+  if(!v.length){ html += '<tr><td colspan="10" class="empty">No deleted videos</td></tr>'; }
   else for(const row of v){
     const profileLink = row.profile_url && row.profile_url.startsWith('http')
       ? `<a class="link" href="${row.profile_url}" target="_blank">${row.profile_url.substring(0,50)}${row.profile_url.length>50?'...':''}</a>`
@@ -795,9 +861,10 @@ async function renderDeleted(search, profile){
     const star = row.favorite ? '\u2605' : '\u2606';
     const checked = selectedIds.has(row.id) ? 'checked' : '';
     html += `<tr>
-      <td><input type="checkbox" ${checked} onchange="toggleSelect(${row.id}, this.checked)"></td>
+      <td><input type="checkbox" ${checked} data-id="${row.id}" onclick="handleCheckboxClick(event, ${row.id})" onchange="toggleSelect(${row.id}, this.checked)"></td>
       <td>${row.id}</td>
       <td><span class="star ${isFav}" onclick="toggleFavorite(${row.id}, this)">${star}</span></td>
+      <td><span class="tag">${fmt(row.source)}</span></td>
       <td><div class="font-semibold">${fmt(row.title)}</div><a class="link" href="${row.url}" target="_blank">${row.url.substring(0,60)}${row.url.length>60?'...':''}</a></td>
       <td>${fmt(row.duration)}</td>
       <td>${profileLink}</td>
@@ -820,39 +887,6 @@ async function restoreVideo(id){
   } catch(e) {
     alert('Failed to restore: '+e.message);
   }
-}
-
-async function renderFavorites(search, profile){
-  const sort = document.getElementById('sort').value;
-  const q = search ? `&search=${encodeURIComponent(search)}` : '';
-  const qp = profile ? `&profile=${encodeURIComponent(profile)}` : '';
-  const data = await api(`/api/videos/favorites/list?page=${currentPage}&limit=${currentLimit}&sort=${encodeURIComponent(sort)}${q}${qp}`);
-  const v = data.videos, p = data.pagination;
-  const pageIds = v.map(r=>r.id);
-  let html = '<div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="selectAll" onclick="toggleSelectAll(this.checked, ['+pageIds.join(',')+'])"></th><th>ID</th><th>Fav</th><th>Title</th><th>Duration</th><th>Profile</th><th>Views</th><th>Crawled</th></tr></thead><tbody>';
-  if(!v.length){ html += '<tr><td colspan="8" class="empty">No favorites found</td></tr>'; }
-  else for(const row of v){
-    const profileLink = row.profile_url && row.profile_url.startsWith('http')
-      ? `<a class="link" href="${row.profile_url}" target="_blank">${row.profile_url.substring(0,50)}${row.profile_url.length>50?'...':''}</a>`
-      : '<span class="text-xs text-slate-500">-</span>';
-    const isFav = row.favorite ? 'on' : 'off';
-    const star = row.favorite ? '\u2605' : '\u2606';
-    const checked = selectedIds.has(row.id) ? 'checked' : '';
-    html += `<tr>
-      <td><input type="checkbox" ${checked} onchange="toggleSelect(${row.id}, this.checked)"></td>
-      <td>${row.id}</td>
-      <td><span class="star ${isFav}" onclick="toggleFavorite(${row.id}, this)">${star}</span></td>
-      <td><div class="font-semibold">${fmt(row.title)}</div><a class="link" href="${row.url}" target="_blank">${row.url.substring(0,60)}${row.url.length>60?'...':''}</a></td>
-      <td>${fmt(row.duration)}</td>
-      <td>${profileLink}</td>
-      <td>${fmt(row.views)}</td>
-      <td class="text-xs text-slate-400">${timeAgo(row.created_at)}</td>
-    </tr>`;
-  }
-  html += '</tbody></table></div>';
-  document.getElementById('content').innerHTML = html;
-  document.getElementById('pageInfo').textContent = `Page ${p.page} of ${p.pages} (${p.total} total)`;
-  renderPagination(p.page, p.pages);
 }
 
 function renderPagination(page, pages){

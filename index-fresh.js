@@ -15,7 +15,7 @@ const { saveVideos } = require('./lib/db');
       const fresh = await xvideos.videos.fresh({ page: currentPage });
 
       if (fresh.videos && fresh.videos.length > 0) {
-        const saved = saveVideos(fresh.videos, currentPage);
+        const saved = saveVideos(fresh.videos, currentPage, 'fresh');
         totalSaved += saved;
         console.log(`  Saved ${saved} videos from page ${currentPage}`);
       } else {

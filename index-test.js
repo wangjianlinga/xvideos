@@ -10,4 +10,8 @@ const xvideos = module.exports = require('./lib');
   // console.log(bestList);
 
 
+  const videos = await xvideos.videos.search({ k: 'public', page: 5 });
+   console.log(videos);
+
+
 })();

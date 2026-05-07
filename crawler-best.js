@@ -32,7 +32,7 @@ if (isNaN(TARGET_PAGES) || TARGET_PAGES < 1) {
       const result = await xvideos.videos.best({ year: TARGET_YEAR, month: TARGET_MONTH, page: currentPage });
 
       if (result.videos && result.videos.length > 0) {
-        const saved = saveVideos(result.videos, currentPage);
+        const saved = saveVideos(result.videos, currentPage, 'best');
         totalSaved += saved;
         console.log(`  Saved ${saved} videos from page ${currentPage}`);
       } else {
