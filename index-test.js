@@ -9,10 +9,13 @@ const xvideos = module.exports = require('./lib');
 
   // console.log(bestList);
 
+  const details = await xvideos.videos.details({ url: 'https://www.xvideos.com/video36638661/chaturbate_lulacum69_30-05-2018' });
 
-  const videos = await xvideos.videos.details({ k: '抖音', page: 5 });
-   console.log(videos);
+// Log detailed information about the video
+console.log(details);
 
+
+ 
 
    
 
