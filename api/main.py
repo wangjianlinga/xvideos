@@ -81,6 +81,7 @@ def init_db():
             page_number INTEGER,
             favorite INTEGER DEFAULT 0,
             is_deleted INTEGER DEFAULT 0,
+            downloaded INTEGER DEFAULT 0,
             source TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -94,10 +95,13 @@ def init_db():
         cursor.execute("ALTER TABLE videos ADD COLUMN favorite INTEGER DEFAULT 0")
     if "is_deleted" not in columns:
         cursor.execute("ALTER TABLE videos ADD COLUMN is_deleted INTEGER DEFAULT 0")
+    if "downloaded" not in columns:
+        cursor.execute("ALTER TABLE videos ADD COLUMN downloaded INTEGER DEFAULT 0")
     if "source" not in columns:
         cursor.execute("ALTER TABLE videos ADD COLUMN source TEXT")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_videos_favorite ON videos(favorite)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_videos_deleted ON videos(is_deleted)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_videos_downloaded ON videos(downloaded)")
     conn.commit()
     conn.close()
 
@@ -122,7 +126,7 @@ def list_videos(
     conn = get_conn(VIDEOS_DB)
     cursor = conn.cursor()
 
-    base_where = "is_deleted = 0"
+    base_where = "is_deleted = 0 AND downloaded = 0"
     conditions = []
     params = []
     if favorite is not None:
@@ -370,6 +374,115 @@ def list_deleted(
     }
 
 
+@app.post("/api/videos/{video_id}/mark-downloaded")
+def toggle_downloaded(video_id: int):
+    conn = get_conn(VIDEOS_DB)
+    cursor = conn.cursor()
+    cursor.execute("SELECT downloaded FROM videos WHERE id = ?", (video_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return JSONResponse({"error": "Not found"}, status_code=404)
+    new_downloaded = 1 if row["downloaded"] == 0 else 0
+    cursor.execute("UPDATE videos SET downloaded = ? WHERE id = ?", (new_downloaded, video_id))
+    conn.commit()
+    conn.close()
+    return {"id": video_id, "downloaded": new_downloaded}
+
+
+@app.post("/api/videos/batch-mark-downloaded")
+def batch_mark_downloaded(payload: BatchDeleteRequest):
+    if not payload.ids:
+        return JSONResponse({"error": "No ids provided"}, status_code=400)
+    conn = get_conn(VIDEOS_DB)
+    cursor = conn.cursor()
+    placeholders = ",".join(["?"] * len(payload.ids))
+    cursor.execute(f"UPDATE videos SET downloaded = 1 WHERE id IN ({placeholders})", tuple(payload.ids))
+    marked = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return {"marked": marked}
+
+
+@app.post("/api/videos/batch-unmark-downloaded")
+def batch_unmark_downloaded(payload: BatchDeleteRequest):
+    if not payload.ids:
+        return JSONResponse({"error": "No ids provided"}, status_code=400)
+    conn = get_conn(VIDEOS_DB)
+    cursor = conn.cursor()
+    placeholders = ",".join(["?"] * len(payload.ids))
+    cursor.execute(f"UPDATE videos SET downloaded = 0 WHERE id IN ({placeholders})", tuple(payload.ids))
+    unmarked = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return {"unmarked": unmarked}
+
+
+@app.get("/api/videos/downloaded/list")
+def list_downloaded(
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, ge=1, le=100),
+    search: Optional[str] = Query(None),
+    profile: Optional[str] = Query(None),
+    sort: Optional[str] = Query("created_at_desc"),
+    favorite: Optional[int] = Query(None),
+    source: Optional[str] = Query(None)
+):
+    conn = get_conn(VIDEOS_DB)
+    cursor = conn.cursor()
+
+    base_where = "downloaded = 1 AND is_deleted = 0"
+    conditions = []
+    params = []
+    if favorite is not None:
+        conditions.append("favorite = ?")
+        params.append(favorite)
+    if source:
+        conditions.append("source LIKE ?")
+        params.append(f"%{source}%")
+    if search:
+        search_term = f"%{search}%"
+        conditions.append("(title LIKE ? OR profile_name LIKE ?)")
+        params.extend([search_term, search_term])
+    if profile:
+        profile_term = f"%{profile}%"
+        conditions.append("profile_name LIKE ?")
+        params.append(profile_term)
+    where_clause = base_where
+    if conditions:
+        where_clause += " AND " + " AND ".join(conditions)
+    cursor.execute(f"SELECT COUNT(*) as total FROM videos WHERE {where_clause}", tuple(params))
+    total = cursor.fetchone()["total"]
+    cursor.execute(f"SELECT * FROM videos WHERE {where_clause}", tuple(params))
+
+    rows = cursor.fetchall()
+    conn.close()
+
+    videos: List[dict] = [dict(row) for row in rows]
+
+    if sort == "views_desc":
+        videos.sort(key=lambda v: parse_views_to_number(v.get("views")), reverse=True)
+    elif sort == "views_asc":
+        videos.sort(key=lambda v: parse_views_to_number(v.get("views")))
+    elif sort == "title_asc":
+        videos.sort(key=lambda v: (v.get("title") or "").lower())
+    else:
+        videos.sort(key=lambda v: v.get("created_at") or "", reverse=True)
+
+    offset = (page - 1) * limit
+    paginated = videos[offset:offset + limit]
+
+    return {
+        "videos": paginated,
+        "pagination": {
+            "page": page,
+            "limit": limit,
+            "total": total,
+            "pages": (total + limit - 1) // limit
+        }
+    }
+
+
 @app.get("/api/search")
 def search_videos(
     q: str = Query(..., min_length=1),
@@ -381,12 +494,12 @@ def search_videos(
     cursor = conn.cursor()
     search_term = f"%{q}%"
     cursor.execute(
-        "SELECT COUNT(*) as total FROM videos WHERE is_deleted = 0 AND (title LIKE ? OR url LIKE ? OR profile_name LIKE ?)",
+        "SELECT COUNT(*) as total FROM videos WHERE is_deleted = 0 AND downloaded = 0 AND (title LIKE ? OR url LIKE ? OR profile_name LIKE ?)",
         (search_term, search_term, search_term)
     )
     total = cursor.fetchone()["total"]
     cursor.execute(
-        "SELECT * FROM videos WHERE is_deleted = 0 AND (title LIKE ? OR url LIKE ? OR profile_name LIKE ?)",
+        "SELECT * FROM videos WHERE is_deleted = 0 AND downloaded = 0 AND (title LIKE ? OR url LIKE ? OR profile_name LIKE ?)",
         (search_term, search_term, search_term)
     )
     rows = cursor.fetchall()
@@ -421,18 +534,21 @@ def search_videos(
 def get_dashboard():
     conn = get_conn(VIDEOS_DB)
     cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) as total, MAX(created_at) as last_crawl FROM videos WHERE is_deleted = 0")
+    cursor.execute("SELECT COUNT(*) as total, MAX(created_at) as last_crawl FROM videos WHERE is_deleted = 0 AND downloaded = 0")
     videos_stats = dict(cursor.fetchone())
     cursor.execute("SELECT COUNT(*) as total FROM videos WHERE favorite = 1 AND is_deleted = 0")
     favorites_stats = dict(cursor.fetchone())
     cursor.execute("SELECT COUNT(*) as total FROM videos WHERE is_deleted = 1")
     deleted_stats = dict(cursor.fetchone())
+    cursor.execute("SELECT COUNT(*) as total FROM videos WHERE downloaded = 1 AND is_deleted = 0")
+    downloaded_stats = dict(cursor.fetchone())
     conn.close()
 
     return {
         "videos": videos_stats,
         "favorites": favorites_stats,
         "deleted": deleted_stats,
+        "downloaded": downloaded_stats,
     }
 
 
@@ -440,7 +556,7 @@ def get_dashboard():
 def get_stats():
     conn = get_conn(VIDEOS_DB)
     cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) as total, MAX(created_at) as last_crawl FROM videos WHERE is_deleted = 0")
+    cursor.execute("SELECT COUNT(*) as total, MAX(created_at) as last_crawl FROM videos WHERE is_deleted = 0 AND downloaded = 0")
     row = cursor.fetchone()
     conn.close()
     return dict(row) if row else {"total": 0, "last_crawl": None}
@@ -592,6 +708,8 @@ DASHBOARD_HTML = """
   .star.off { color:#64748b; }
   .fav-filter-active { color:#fbbf24 !important; cursor:pointer; }
   .batch-bar { display:none; align-items:center; gap:0.5rem; padding:0.5rem 0.75rem; background:#1e293b; border:1px solid #334155; border-radius:0.45rem; margin-bottom:0.75rem; }
+  .btn-copy { font-size:0.65rem; padding:0.1rem 0.3rem; border-radius:0.25rem; background:#334155; color:#94a3b8; border:none; cursor:pointer; margin-left:0.4rem; }
+  .btn-copy:hover { background:#475569; color:#e2e8f0; }
   .batch-bar.active { display:inline-flex; }
   html { scrollbar-width: none; }
   body { -ms-overflow-style: none; }
@@ -617,6 +735,7 @@ DASHBOARD_HTML = """
   <div class="flex border-b border-slate-700 mb-4">
     <div class="tab-btn active" onclick="switchTab('videos')" id="tab-videos">Videos</div>
     <div class="tab-btn" onclick="switchTab('deleted')" id="tab-deleted">Trash</div>
+    <div class="tab-btn" onclick="switchTab('downloaded')" id="tab-downloaded">Downloaded</div>
     <div class="tab-btn" onclick="switchTab('crawler')" id="tab-crawler">Scrawler</div>
   </div>
 
@@ -634,6 +753,8 @@ DASHBOARD_HTML = """
     <div id="batchBar" class="batch-bar">
       <span class="text-xs text-slate-400" id="batchCount">0 selected</span>
       <button class="btn btn-primary" id="restoreBtn" onclick="confirmBatchRestore()" style="display:none;">Restore Selected</button>
+      <button class="btn btn-primary" id="downloadedBtn" onclick="confirmBatchMarkDownloaded()" style="display:none;">Mark Downloaded</button>
+      <button class="btn btn-ghost" id="unmarkBtn" onclick="confirmBatchUnmarkDownloaded()" style="display:none;">Unmark Downloaded</button>
       <button class="btn btn-danger" id="batchBtn" onclick="confirmBatchDelete()">Delete Selected</button>
     </div>
     <div class="ml-auto text-xs text-slate-400" id="pageInfo"></div>
@@ -682,12 +803,17 @@ function timeAgo(d){ if(!d)return '-'; const s=Math.floor((Date.now()-new Date(d
 
 async function loadDashboard(){
   const data = await api('/api/dashboard');
-  const v = data.videos, f = data.favorites, d = data.deleted;
+  const v = data.videos, f = data.favorites, d = data.deleted, dl = data.downloaded;
   document.getElementById('stats').innerHTML = `
     <div class="card">
       <div class="text-xs text-slate-400 uppercase tracking-wider">Videos (DB)</div>
       <div class="text-3xl font-bold mt-1">${fmt(v.total)}</div>
       <div class="text-xs text-slate-500 mt-1">Last: ${timeAgo(v.last_crawl)}</div>
+    </div>
+    <div class="card">
+      <div class="text-xs text-slate-400 uppercase tracking-wider">Downloaded</div>
+      <div class="text-3xl font-bold mt-1">${fmt(dl.total)}</div>
+      <div class="text-xs text-slate-500 mt-1">Already downloaded</div>
     </div>
     <div class="card">
       <div class="text-xs text-slate-400 uppercase tracking-wider">Trash</div>
@@ -707,8 +833,12 @@ function switchTab(tab){
   document.getElementById('tab-'+tab).classList.add('active');
   const btn = document.getElementById('batchBtn');
   const restoreBtn = document.getElementById('restoreBtn');
-  if(btn) btn.style.display = (tab==='deleted' || tab==='crawler') ? 'none' : 'inline-flex';
+  const downloadedBtn = document.getElementById('downloadedBtn');
+  const unmarkBtn = document.getElementById('unmarkBtn');
+  if(btn) btn.style.display = (tab==='deleted' || tab==='downloaded' || tab==='crawler') ? 'none' : 'inline-flex';
   if(restoreBtn) restoreBtn.style.display = tab==='deleted' ? 'inline-flex' : 'none';
+  if(downloadedBtn) downloadedBtn.style.display = tab==='videos' ? 'inline-flex' : 'none';
+  if(unmarkBtn) unmarkBtn.style.display = tab==='downloaded' ? 'inline-flex' : 'none';
   render();
 }
 
@@ -717,6 +847,7 @@ async function render(){
   const search = document.getElementById('search').value.trim();
   const source = document.getElementById('searchSource').value.trim();
   if(currentTab==='deleted') await renderDeleted(search, favFilter, source);
+  else if(currentTab==='downloaded') await renderDownloaded(search, favFilter, source);
   else await renderVideos(search, favFilter, source);
 }
 
@@ -814,6 +945,52 @@ async function executeBatchRestore(){
   }
 }
 
+function confirmBatchMarkDownloaded(){
+  if(selectedIds.size===0) return;
+  executeBatchMarkDownloaded();
+}
+
+async function executeBatchMarkDownloaded(){
+  if(selectedIds.size===0) return;
+  try {
+    const data = await api('/api/videos/batch-mark-downloaded', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ids: Array.from(selectedIds)})
+    });
+    selectedIds.clear();
+    updateBatchBar();
+    loadDashboard();
+    render();
+    alert('Marked '+data.marked+' video(s) as downloaded');
+  } catch(e) {
+    alert('Failed: '+e.message);
+  }
+}
+
+function confirmBatchUnmarkDownloaded(){
+  if(selectedIds.size===0) return;
+  executeBatchUnmarkDownloaded();
+}
+
+async function executeBatchUnmarkDownloaded(){
+  if(selectedIds.size===0) return;
+  try {
+    const data = await api('/api/videos/batch-unmark-downloaded', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ids: Array.from(selectedIds)})
+    });
+    selectedIds.clear();
+    updateBatchBar();
+    loadDashboard();
+    render();
+    alert('Unmarked '+data.unmarked+' video(s)');
+  } catch(e) {
+    alert('Failed: '+e.message);
+  }
+}
+
 function updateSelectAllCheckbox(){
   const selectAll = document.getElementById('selectAll');
   if(selectAll && currentPageIds.length > 0){
@@ -857,8 +1034,8 @@ async function renderVideos(search, favoriteOnly, source){
   const pageIds = v.map(r=>r.id);
   currentPageIds = pageIds;
   const favCls = favFilter ? 'fav-filter-active' : '';
-  let html = '<div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="selectAll" onclick="toggleSelectAll(this.checked, ['+pageIds.join(',')+'])"></th><th>ID</th><th onclick="toggleFavFilter()" class="'+favCls+'">Fav</th><th>Source</th><th>Title</th><th>Duration</th><th>Profile</th><th>Views</th><th>Crawled</th></tr></thead><tbody>';
-  if(!v.length){ html += '<tr><td colspan="9" class="empty">No videos found</td></tr>'; }
+  let html = '<div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="selectAll" onclick="toggleSelectAll(this.checked, ['+pageIds.join(',')+'])"></th><th>ID</th><th onclick="toggleFavFilter()" class="'+favCls+'">Fav</th><th>Source</th><th>Title</th><th>Duration</th><th>Profile</th><th>Views</th><th>Crawled</th><th>Action</th></tr></thead><tbody>';
+  if(!v.length){ html += '<tr><td colspan="10" class="empty">No videos found</td></tr>'; }
   else for(const row of v){
     const profileLink = row.profile_url && row.profile_url.startsWith('http')
       ? `<a class="link" href="${row.profile_url}" target="_blank">${row.profile_url.substring(0,50)}${row.profile_url.length>50?'...':''}</a>`
@@ -871,11 +1048,12 @@ async function renderVideos(search, favoriteOnly, source){
       <td>${row.id}</td>
       <td><span class="star ${isFav}" onclick="toggleFavorite(${row.id}, this)">${star}</span></td>
       <td><span class="tag">${fmt(row.source)}</span></td>
-      <td><div class="font-semibold">${fmt(row.title)}</div><a class="link" href="${row.url}" target="_blank">${row.url.substring(0,60)}${row.url.length>60?'...':''}</a></td>
+      <td><div class="font-semibold">${fmt(row.title)}</div><a class="link" href="${row.url}" target="_blank">${row.url.substring(0,60)}${row.url.length>60?'...':''}</a><button class="btn-copy" onclick="copyToClipboard('${row.url}', this)">Copy</button></td>
       <td>${fmt(row.duration)}</td>
-      <td>${profileLink}</td>
+      <td>${profileLink}${row.profile_url && row.profile_url.startsWith('http') ? `<button class="btn-copy" onclick="copyToClipboard('${row.profile_url}', this)">Copy</button>` : ''}</td>
       <td>${fmt(row.views)}</td>
       <td class="text-xs text-slate-400">${timeAgo(row.created_at)}</td>
+      <td><button class="btn btn-primary" onclick="markDownloaded(${row.id})">Downloaded</button></td>
     </tr>`;
   }
   html += '</tbody></table></div>';
@@ -909,9 +1087,9 @@ async function renderDeleted(search, favoriteOnly, source){
       <td>${row.id}</td>
       <td><span class="star ${isFav}" onclick="toggleFavorite(${row.id}, this)">${star}</span></td>
       <td><span class="tag">${fmt(row.source)}</span></td>
-      <td><div class="font-semibold">${fmt(row.title)}</div><a class="link" href="${row.url}" target="_blank">${row.url.substring(0,60)}${row.url.length>60?'...':''}</a></td>
+      <td><div class="font-semibold">${fmt(row.title)}</div><a class="link" href="${row.url}" target="_blank">${row.url.substring(0,60)}${row.url.length>60?'...':''}</a><button class="btn-copy" onclick="copyToClipboard('${row.url}', this)">Copy</button></td>
       <td>${fmt(row.duration)}</td>
-      <td>${profileLink}</td>
+      <td>${profileLink}${row.profile_url && row.profile_url.startsWith('http') ? `<button class="btn-copy" onclick="copyToClipboard('${row.profile_url}', this)">Copy</button>` : ''}</td>
       <td>${fmt(row.views)}</td>
       <td class="text-xs text-slate-400">${timeAgo(row.created_at)}</td>
       <td><button class="btn btn-primary" onclick="restoreVideo(${row.id})">Restore</button></td>
@@ -931,6 +1109,64 @@ async function restoreVideo(id){
   } catch(e) {
     alert('Failed to restore: '+e.message);
   }
+}
+
+async function markDownloaded(id){
+  try {
+    await api('/api/videos/'+id+'/mark-downloaded', {method:'POST'});
+    loadDashboard();
+    render();
+  } catch(e) {
+    alert('Failed: '+e.message);
+  }
+}
+
+async function unmarkDownloaded(id){
+  try {
+    await api('/api/videos/'+id+'/mark-downloaded', {method:'POST'});
+    loadDashboard();
+    render();
+  } catch(e) {
+    alert('Failed: '+e.message);
+  }
+}
+
+async function renderDownloaded(search, favoriteOnly, source){
+  const sort = document.getElementById('sort').value;
+  const q = search ? `&search=${encodeURIComponent(search)}` : '';
+  const fav = favoriteOnly ? `&favorite=1` : '';
+  const src = source ? `&source=${encodeURIComponent(source)}` : '';
+  const data = await api(`/api/videos/downloaded/list?page=${currentPage}&limit=${currentLimit}&sort=${encodeURIComponent(sort)}${q}${fav}${src}`);
+  const v = data.videos, p = data.pagination;
+  const pageIds = v.map(r=>r.id);
+  currentPageIds = pageIds;
+  const favCls = favFilter ? 'fav-filter-active' : '';
+  let html = '<div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="selectAll" onclick="toggleSelectAll(this.checked, ['+pageIds.join(',')+'])"></th><th>ID</th><th onclick="toggleFavFilter()" class="'+favCls+'">Fav</th><th>Source</th><th>Title</th><th>Duration</th><th>Profile</th><th>Views</th><th>Crawled</th><th>Action</th></tr></thead><tbody>';
+  if(!v.length){ html += '<tr><td colspan="10" class="empty">No downloaded videos</td></tr>'; }
+  else for(const row of v){
+    const profileLink = row.profile_url && row.profile_url.startsWith('http')
+      ? `<a class="link" href="${row.profile_url}" target="_blank">${row.profile_url.substring(0,50)}${row.profile_url.length>50?'...':''}</a>`
+      : '<span class="text-xs text-slate-500">-</span>';
+    const isFav = row.favorite ? 'on' : 'off';
+    const star = row.favorite ? '\u2605' : '\u2606';
+    const checked = selectedIds.has(row.id) ? 'checked' : '';
+    html += `<tr>
+      <td><input type="checkbox" ${checked} data-id="${row.id}" onclick="handleCheckboxClick(event, ${row.id})" onchange="toggleSelect(${row.id}, this.checked)"></td>
+      <td>${row.id}</td>
+      <td><span class="star ${isFav}" onclick="toggleFavorite(${row.id}, this)">${star}</span></td>
+      <td><span class="tag">${fmt(row.source)}</span></td>
+      <td><div class="font-semibold">${fmt(row.title)}</div><a class="link" href="${row.url}" target="_blank">${row.url.substring(0,60)}${row.url.length>60?'...':''}</a><button class="btn-copy" onclick="copyToClipboard('${row.url}', this)">Copy</button></td>
+      <td>${fmt(row.duration)}</td>
+      <td>${profileLink}${row.profile_url && row.profile_url.startsWith('http') ? `<button class="btn-copy" onclick="copyToClipboard('${row.profile_url}', this)">Copy</button>` : ''}</td>
+      <td>${fmt(row.views)}</td>
+      <td class="text-xs text-slate-400">${timeAgo(row.created_at)}</td>
+      <td><button class="btn btn-ghost" onclick="unmarkDownloaded(${row.id})">Unmark</button></td>
+    </tr>`;
+  }
+  html += '</tbody></table></div>';
+  document.getElementById('content').innerHTML = html;
+  document.getElementById('pageInfo').textContent = `Page ${p.page} of ${p.pages} (${p.total} total)`;
+  renderPagination(p.page, p.pages);
 }
 
 function renderPagination(page, pages){
@@ -1032,6 +1268,22 @@ async function triggerCrawlSearch(){
   btn.disabled = false;
   log.textContent = data.success ? data.stdout || 'Done' : (data.error || data.stderr || 'Failed');
   loadDashboard();
+}
+
+async function copyToClipboard(text, el){
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch(e) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+  }
+  const orig = el.textContent;
+  el.textContent = 'Copied!';
+  setTimeout(() => el.textContent = orig, 1200);
 }
 
 loadDashboard();

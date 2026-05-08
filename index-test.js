@@ -10,8 +10,11 @@ const xvideos = module.exports = require('./lib');
   // console.log(bestList);
 
 
-  const videos = await xvideos.videos.search({ k: '抖音', page: 5 });
+  const videos = await xvideos.videos.details({ k: '抖音', page: 5 });
    console.log(videos);
+
+
+   
 
 
 })();
